@@ -108,6 +108,7 @@ module CHIP #(                                                                  
         reg [31: 0] mul_in_a, mul_in_b;
         reg [31: 0] inst;
         reg [1:0] state, state_nxt;
+        parameter S_IDLE = 0, S_MULTI_CYCLE_EXEC = 1, S_ONE_CYCLE_EXEC = 2;
         
 
 
@@ -151,27 +152,48 @@ module CHIP #(                                                                  
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
     
     // todo: Finite State Machine
-`   //pull o_IMEM_cen
+    always @(*) begin
+        case(state)
+            IDLE: begin
+                state_nxt = ({opcode, funct3, funct7} == {MUL, MUL_FUNCT3, MUL_FUNCT7})? S_MULTI_CYCLE_EXEC : S_ONE_CYCLE_EXEC;
+            end
+            S_MULTI_CYCLE_EXEC: begin
+                if (mul_ready == 0) begin
+                    state_nxt == state;
+                end
+                else begin
+                    state_nxt = S_ONE_CYCLE_OP; // the following one cycle for dataWrite
+                end
+            end
+            S_ONE_CYCLE_EXEC: begin
+                state_nxt = ({opcode, funct3, funct7} == {MUL, MUL_FUNCT3, MUL_FUNCT7})? S_MULTI_CYCLE_EXEC : S_ONE_CYCLE_EXEC;
+            end
+        endcase
+    end
 
     // Todo: any combinational/sequential circuit
 
     always @(posedge i_clk or negedge i_rst_n) begin
         if (!i_rst_n) begin
             PC <= 32'h00010000; // Do not modify this value!!!
+            state <= S_IDLE;
         end
         else begin
+            state <= state_nxt;
             PC <= next_PC;
         end
     end
 
     always @(*) begin
-
-        if(o_IMEM_cen == 1) begin
+        if(state == S_MULTI_CYCLE_EXEC || state ==  S_ONE_CYCLE_EXEC) begin
+            o_IMEM_cen = 1;
             inst = i_IMEM_data;
         end
         else begin
+            o_IMEM_cen = 0;
             inst = inst;
         end
+
         next_PC = PC + 4;
 
         opcode = inst[6:0];
@@ -230,7 +252,7 @@ module CHIP #(                                                                  
                         mul_valid = 1;
                         
                         if (mul_ready) begin
-                            next_PC = next_PC;
+                            next_PC = PC + 4;
                             regwrite = 1;
                         end
                         else begin
@@ -238,8 +260,12 @@ module CHIP #(                                                                  
                             regwrite = 0;
                         end
                         write_data = mul_result[31:0];
-
                     end
+                endcase
+            end
+            7'b0010011: begin
+                case (funct3)
+                    ADDI_FUNCT3
                 endcase
             end
 
