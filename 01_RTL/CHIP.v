@@ -116,6 +116,7 @@ module CHIP #(                                                                  
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 
     // TODO: any wire assignment
+    assign o_IMEM_addr = PC;
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 // Submoddules
@@ -149,6 +150,9 @@ module CHIP #(                                                                  
 // Always Blocks
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
     
+    // todo: Finite State Machine
+`   //pull o_IMEM_cen
+
     // Todo: any combinational/sequential circuit
 
     always @(posedge i_clk or negedge i_rst_n) begin
@@ -161,7 +165,15 @@ module CHIP #(                                                                  
     end
 
     always @(*) begin
-        inst = i_IMEM_data;
+
+        if(o_IMEM_cen == 1) begin
+            inst = i_IMEM_data;
+        end
+        else begin
+            inst = inst;
+        end
+        next_PC = PC + 4;
+
         opcode = inst[6:0];
         funct3 = inst[14:12];
         funct7 = inst[31:25];
@@ -170,10 +182,10 @@ module CHIP #(                                                                  
         rd = inst[11:7];
         regwrite = 0;
         mul_valid = 0;
-        mul_mode = 0;
+        mul_mode = 3;
         mul_in_a = 0;
         mul_in_b = 0;
-        next_PC = PC + 4;
+        
         case(opcode) 
             7'b0010111: begin //auipc
                 regwrite = 1;
@@ -192,6 +204,45 @@ module CHIP #(                                                                  
                 next_PC = $signed({1'b0, rs1_data}) + $signed(imm[11:0]);
                 write_data = PC + 4;
             end
+            7'b0110011: begin // add, sub, and, xor
+                
+                case({funct3, funct7})
+                    {ADD_FUNCT3, ADD_FUNCT7}: begin
+                        regwrite = 1;
+                        write_data = rs1_data + rs2_data;
+                        // dealing with overflow
+                    end
+                    {SUB_FUNCT3, SUB_FUNCT7}: begin
+                        regwrite = 1;
+                        write_data = rs1_data - rs2_data;
+                    end
+                    {AND_FUNCT3, ADD_FUNCT7}: begin
+                        regwrite = 1;
+                        write_data = rs1_data & rs2_data;
+                    end
+                    {XOR_FUNCT3, XOR_FUNCT7}: begin
+                        regwrite = 1;
+                        write_data = rs1_data ^ rs2_data;
+                    end
+                    {MUL_FUNCT3, MUL_FUNCT7}: begin
+                        regwrite = 0;
+                        mul_mode = 2;
+                        mul_valid = 1;
+                        
+                        if (mul_ready) begin
+                            next_PC = next_PC;
+                            regwrite = 1;
+                        end
+                        else begin
+                            next_PC = PC;
+                            regwrite = 0;
+                        end
+                        write_data = mul_result[31:0];
+
+                    end
+                endcase
+            end
+
             
         endcase
 
@@ -247,7 +298,7 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
     // Todo: your HW2
     // Definition of ports
     input clk, rst_n, valid
-    input mode[1:0]; // 0: shift left, 1: shift right, 2: mul
+    input mode[1:0]; // 0: shift left, 1: shift right, 2: mul, 3:IDLE
     output ready;
     input [31:0] in_A, in_B;
     output [63:0] out;
@@ -267,7 +318,7 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
     assign out = alu_out;
 
     always @(*) begin
-        if (valid) begin
+        if (valid && counter == 0) begin
             operand_a_nxt = in_A;
             operand_b_nxt = in_B;
         end
@@ -338,20 +389,20 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
     always @(*) begin
         case(mode)
             2'b00: begin
-                alu_out = operand_a <<< operand_b;
+                alu_out = operand_a << operand_b;
             end
             2'b01: begin
                 alu_out = operand_a >> operand_b;
             end
             2'b10: begin
                     if(operand_b[counter]) begin
-                        alu_out = alu_out + (operand_a <<< counter);
+                        alu_out = alu_out + (operand_a << counter);
                     end
                     else begin
                         alu_out = alu_out;
                     end
                     if(counter == 31) begin //output the lower 32 bits
-                    alu_out = alu_out[31:0];
+                        alu_out = alu_out[31:0];
                     end
                     else begin
                         alu_out = alu_out;
