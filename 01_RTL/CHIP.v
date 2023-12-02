@@ -91,8 +91,8 @@ module CHIP #(                                                                  
     
     // TODO: any declaration
         reg [BIT_W-1:0] PC, next_PC;
-        wire mem_cen, mem_wen;
-        wire [BIT_W-1:0] mem_addr, mem_wdata, mem_rdata;
+        reg mem_cen, mem_wen;
+        reg [BIT_W-1:0] mem_addr, mem_wdata, mem_rdata;
         wire mem_stall;
 
         reg [6: 0] opcode;
@@ -103,12 +103,15 @@ module CHIP #(                                                                  
         reg [31: 0] imm;
         reg regwrite;
         reg mul_ready, mul_valid; //for multi-cycle operation
-        reg [2: 0] mul_mode;
+        reg [1: 0] mul_mode;
         reg [63: 0] mul_result;
         reg [31: 0] mul_in_a, mul_in_b;
         reg [31: 0] inst;
-        reg [1:0] state, state_nxt;
+        reg [1: 0] state, state_nxt;
+        reg imem_cen, dmem_wen, dmem_cen;
         parameter S_IDLE = 0, S_MULTI_CYCLE_EXEC = 1, S_ONE_CYCLE_EXEC = 2;
+        reg finish;
+        reg [31:0] temp;
         
 
 
@@ -118,6 +121,12 @@ module CHIP #(                                                                  
 
     // TODO: any wire assignment
     assign o_IMEM_addr = PC;
+    assign o_IMEM_cen = imem_cen;
+    assign o_DMEM_cen = mem_cen;
+    assign o_DMEM_wen = mem_wen;
+    assign o_DMEM_addr = mem_addr;
+    assign o_DMEM_wdata = mem_wdata;
+    assign o_finish = finish;
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 // Submoddules
@@ -154,19 +163,22 @@ module CHIP #(                                                                  
     // todo: Finite State Machine
     always @(*) begin
         case(state)
-            IDLE: begin
+            S_IDLE: begin
                 state_nxt = ({opcode, funct3, funct7} == {MUL, MUL_FUNCT3, MUL_FUNCT7})? S_MULTI_CYCLE_EXEC : S_ONE_CYCLE_EXEC;
             end
             S_MULTI_CYCLE_EXEC: begin
                 if (mul_ready == 0) begin
-                    state_nxt == state;
+                    state_nxt = state;
                 end
                 else begin
-                    state_nxt = S_ONE_CYCLE_OP; // the following one cycle for dataWrite
+                    state_nxt = S_ONE_CYCLE_EXEC; // the following one cycle for dataWrite
                 end
             end
             S_ONE_CYCLE_EXEC: begin
                 state_nxt = ({opcode, funct3, funct7} == {MUL, MUL_FUNCT3, MUL_FUNCT7})? S_MULTI_CYCLE_EXEC : S_ONE_CYCLE_EXEC;
+            end
+            default: begin
+                state_nxt = state;
             end
         endcase
     end
@@ -185,17 +197,18 @@ module CHIP #(                                                                  
     end
 
     always @(*) begin
+        temp = inst;
         if(state == S_MULTI_CYCLE_EXEC || state ==  S_ONE_CYCLE_EXEC) begin
-            o_IMEM_cen = 1;
+            imem_cen = 1;
             inst = i_IMEM_data;
         end
         else begin
-            o_IMEM_cen = 0;
-            inst = inst;
+            imem_cen = 0;
+            inst = temp;
         end
 
         next_PC = PC + 4;
-
+        finish = 0;
         opcode = inst[6:0];
         funct3 = inst[14:12];
         funct7 = inst[31:25];
@@ -207,6 +220,13 @@ module CHIP #(                                                                  
         mul_mode = 3;
         mul_in_a = 0;
         mul_in_b = 0;
+        regwrite = 0;
+        mem_addr = 0;
+        mem_wdata = 0;
+        mem_rdata = 0;
+        mem_cen = 0;
+        mem_wen = 0;
+        write_data = 0;
         
         case(opcode) 
             7'b0010111: begin //auipc
@@ -265,13 +285,107 @@ module CHIP #(                                                                  
             end
             7'b0010011: begin
                 case (funct3)
-                    ADDI_FUNCT3
+                    ADDI_FUNCT3: begin //addi
+                        regwrite = 1;
+                        imm = inst[31:20];
+                        write_data = rs1_data + $signed(imm);
+                    end
+                    SLLI_FUNCT3: begin //slli
+                        regwrite = 1;
+                        imm = inst[31:20];
+                        write_data = rs1_data << $signed(imm);
+                    end
+                    SLTI_FUNCT3: begin //slti
+                        regwrite = 1;
+                        imm = inst[31:20];
+                        write_data = (rs1_data < $signed(imm))? 1 : 0;
+                    end
+                    SRAI_FUNCT3: begin //srai
+                        regwrite = 1;
+                        imm = inst[31:20];
+                        write_data = rs1_data >> $signed(imm);
+                    end
+                    default: begin
+                        next_PC = PC + 4;
+                        regwrite = 0;
+                        write_data = 0;
+                        imm = 0;
+                    end
                 endcase
             end
-
-            
+            7'b0000011: begin //lw
+                regwrite = 1;
+                imm = inst[31:20];
+                mem_addr = rs1_data + $signed(imm);
+                mem_wen = 0;
+                mem_cen = 1;
+                write_data = mem_rdata;
+            end
+            7'b0100011: begin //sw
+                regwrite = 0;
+                imm = {inst[31:25], inst[11:7]};
+                mem_addr = rs1_data + $signed(imm);
+                mem_rdata = rs2_data;
+                mem_cen = 1;
+                mem_wen = 1;
+            end
+            7'b1100011: begin //beq, bge, blt, bne
+                imm = {inst[31], inst[7], inst[30:25], inst[11:8], 1'b0};
+                case(funct3)
+                    BEQ_FUNCT3: begin //beq
+                        if(rs1_data == rs2_data) begin
+                            next_PC = PC + $signed(imm);
+                        end
+                        else begin
+                            next_PC = PC + 4;
+                        end
+                    end
+                    BGE_FUNCT3: begin //bge
+                        if(rs1_data >= rs2_data) begin
+                            next_PC = PC + $signed(imm);
+                        end
+                        else begin
+                            next_PC = PC + 4;
+                        end
+                    end
+                    BLT_FUNCT3: begin //blt
+                        if(rs1_data < rs2_data) begin
+                            next_PC = PC + $signed(imm);
+                        end
+                        else begin
+                            next_PC = PC + 4;
+                        end
+                    end
+                    BNE_FUNCT3: begin //bne
+                        if(rs1_data != rs2_data) begin
+                            next_PC = PC + $signed(imm);
+                        end
+                        else begin
+                            next_PC = PC + 4;
+                        end
+                    end
+                    default: begin
+                        next_PC = PC + 4;
+                    end
+                endcase
+            end
+            7'b1110011: begin //ecall
+                regwrite = 0;
+                finish = 1;
+            end
+            default: begin
+                next_PC = PC + 4;
+                regwrite = 0;
+                write_data = 0;
+                imm = 0;
+                finish = 0;
+                mem_addr = 0;
+                mem_wdata = 0;
+                mem_rdata = 0;
+                mem_cen = 0;
+                mem_wen = 0;
+            end
         endcase
-
     end
 
 endmodule
@@ -323,8 +437,8 @@ endmodule
 module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
     // Todo: your HW2
     // Definition of ports
-    input clk, rst_n, valid
-    input mode[1:0]; // 0: shift left, 1: shift right, 2: mul, 3:IDLE
+    input clk, rst_n, valid;
+    input [1:0] mode; // 0: shift left, 1: shift right, 2: mul, 3:IDLE
     output ready;
     input [31:0] in_A, in_B;
     output [63:0] out;
@@ -340,6 +454,7 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
     reg [63:0] alu_out;
     reg [4:0] counter, counter_nxt;
     reg rdy, rdy_nxt;
+    reg [1:0]mode_now, mode_nxt;
     assign ready = rdy;
     assign out = alu_out;
 
@@ -347,10 +462,12 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
         if (valid && counter == 0) begin
             operand_a_nxt = in_A;
             operand_b_nxt = in_B;
+            mode_nxt = mode;
         end
         else begin
             operand_a_nxt = operand_a;
             operand_b_nxt = operand_b;
+            mode_nxt = mode_now;
         end
     end
 
@@ -361,7 +478,7 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
                     state_nxt = S_IDLE;
                 end
                 else begin
-                    case(mode)
+                    case(mode_now)
                         2'b00: begin
                             state_nxt = S_ONE_CYCLE_OP;
                         end
@@ -388,6 +505,9 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
                     state_nxt = S_MULTI_CYCLE_OP;
                 end
             end
+            default: begin
+                state_nxt = state;
+            end
         endcase
     end
 
@@ -413,7 +533,7 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
     end
 
     always @(*) begin
-        case(mode)
+        case(mode_now)
             2'b00: begin
                 alu_out = operand_a << operand_b;
             end
@@ -447,10 +567,10 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
             operand_b <= 0;
             result <= 0;
             done <= 0;
-            temp <= 0;
             alu_out <= 0;
             counter <= 0;
             rdy <= 0;
+            mode_now <= 3;
         end
         else begin
             state <= state_nxt;
@@ -459,6 +579,7 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
             alu_out <= alu_out;
             counter <= counter_nxt;
             rdy <= rdy_nxt;
+            mode_now <= mode_nxt;
         end
     end
 endmodule
