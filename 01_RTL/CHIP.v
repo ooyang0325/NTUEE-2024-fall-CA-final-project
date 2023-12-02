@@ -91,7 +91,7 @@ module CHIP #(                                                                  
     
     // TODO: any declaration
         reg [BIT_W-1:0] PC, next_PC;
-        reg mem_cen, mem_wen;
+        reg mem_cen, mem_wen, imem_cen;
         reg [BIT_W-1:0] mem_addr, mem_wdata, mem_rdata;
         wire mem_stall;
 
@@ -99,16 +99,18 @@ module CHIP #(                                                                  
         reg [2: 0] funct3;
         reg [6: 0] funct7;
         reg [4: 0] rs1, rs2, rd;
-        reg [31: 0] rs1_data, rs2_data, write_data;
+        wire [31: 0] rs1_data, rs2_data;
+        reg [31: 0] write_data;
         reg [31: 0] imm;
         reg regwrite;
-        reg mul_ready, mul_valid; //for multi-cycle operation
+        wire RegWrite;
+        wire mul_ready; //for multi-cycle operation
+        reg mul_valid;
         reg [1: 0] mul_mode;
-        reg [63: 0] mul_result;
+        wire [63: 0] mul_result;
         reg [31: 0] mul_in_a, mul_in_b;
         reg [31: 0] inst;
         reg [1: 0] state, state_nxt;
-        reg imem_cen, dmem_wen, dmem_cen;
         parameter S_IDLE = 0, S_MULTI_CYCLE_EXEC = 1, S_ONE_CYCLE_EXEC = 2;
         reg finish;
         reg [31:0] temp;
@@ -127,6 +129,8 @@ module CHIP #(                                                                  
     assign o_DMEM_addr = mem_addr;
     assign o_DMEM_wdata = mem_wdata;
     assign o_finish = finish;
+    assign RegWrite = regwrite;
+    assign mem_stall = i_DMEM_stall;
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 // Submoddules
@@ -136,7 +140,7 @@ module CHIP #(                                                                  
     Reg_file reg0(               
         .i_clk  (i_clk),             
         .i_rst_n(i_rst_n),         
-        .wen    (RegWrite),          
+        .wen    (regwrite),          
         .rs1    (rs1),                
         .rs2    (rs2),                
         .rd     (rd),                 
@@ -145,7 +149,7 @@ module CHIP #(                                                                  
         .rdata2 (rs2_data)
     );
 
-    MULTDIV_unit muldiv_unit(
+    MULDIV_unit muldiv_unit(
         .clk(i_clk),
         .rst_n(i_rst_n),
         .valid(mul_valid),
@@ -176,6 +180,10 @@ module CHIP #(                                                                  
             end
             S_ONE_CYCLE_EXEC: begin
                 state_nxt = ({opcode, funct3, funct7} == {MUL, MUL_FUNCT3, MUL_FUNCT7})? S_MULTI_CYCLE_EXEC : S_ONE_CYCLE_EXEC;
+                if (mem_stall) begin
+                    state_nxt = S_IDLE;
+                end
+                else state_nxt = state_nxt;
             end
             default: begin
                 state_nxt = state;
@@ -197,195 +205,215 @@ module CHIP #(                                                                  
     end
 
     always @(*) begin
-        temp = inst;
-        if(state == S_MULTI_CYCLE_EXEC || state ==  S_ONE_CYCLE_EXEC) begin
-            imem_cen = 1;
-            inst = i_IMEM_data;
+        imem_cen = 1;
+        inst = i_IMEM_data;
+        if(i_DMEM_stall) begin
+            next_PC = PC;
+            finish = 0;
+            regwrite = 0;
+            //mem_cen = 0;
+            //mem_wen = 0;
         end
         else begin
-            imem_cen = 0;
-            inst = temp;
-        end
-
-        next_PC = PC + 4;
-        finish = 0;
-        opcode = inst[6:0];
-        funct3 = inst[14:12];
-        funct7 = inst[31:25];
-        rs1 = inst[19:15];
-        rs2 = inst[24:20];
-        rd = inst[11:7];
-        regwrite = 0;
-        mul_valid = 0;
-        mul_mode = 3;
-        mul_in_a = 0;
-        mul_in_b = 0;
-        regwrite = 0;
-        mem_addr = 0;
-        mem_wdata = 0;
-        mem_rdata = 0;
-        mem_cen = 0;
-        mem_wen = 0;
-        write_data = 0;
-        
-        case(opcode) 
-            7'b0010111: begin //auipc
-                regwrite = 1;
-                imm = inst[31:12];
-                write_data = PC + {imm, 12'b0};
-            end
-            7'b1101111: begin //jal
-                regwrite = 1;
-                imm[20:0]  = {inst[31], inst[19:12], inst[20], inst[30:21], 1'b0};
-                next_PC = $signed({1'b0, PC}) + $signed(imm[20:0]);
-                write_data = PC + 4;
-            end
-            7'b1100111: begin //jalr
-                regwrite = 1;
-                imm[11:0] = inst[31:20];
-                next_PC = $signed({1'b0, rs1_data}) + $signed(imm[11:0]);
-                write_data = PC + 4;
-            end
-            7'b0110011: begin // add, sub, and, xor
-                
-                case({funct3, funct7})
-                    {ADD_FUNCT3, ADD_FUNCT7}: begin
-                        regwrite = 1;
-                        write_data = rs1_data + rs2_data;
-                        // dealing with overflow
-                    end
-                    {SUB_FUNCT3, SUB_FUNCT7}: begin
-                        regwrite = 1;
-                        write_data = rs1_data - rs2_data;
-                    end
-                    {AND_FUNCT3, ADD_FUNCT7}: begin
-                        regwrite = 1;
-                        write_data = rs1_data & rs2_data;
-                    end
-                    {XOR_FUNCT3, XOR_FUNCT7}: begin
-                        regwrite = 1;
-                        write_data = rs1_data ^ rs2_data;
-                    end
-                    {MUL_FUNCT3, MUL_FUNCT7}: begin
-                        regwrite = 0;
-                        mul_mode = 2;
-                        mul_valid = 1;
-                        
-                        if (mul_ready) begin
-                            next_PC = PC + 4;
+            next_PC = PC + 4;
+            finish = 0;
+            opcode = inst[6:0];
+            funct3 = inst[14:12];
+            funct7 = inst[31:25];
+            rs1 = inst[19:15];
+            rs2 = inst[24:20];
+            rd = inst[11:7];
+            regwrite = 0;
+            mul_valid = 0;
+            mul_mode = 3;
+            mul_in_a = 0;
+            mul_in_b = 0;
+            regwrite = 0;
+            mem_addr = 0;
+            mem_wdata = 0;
+            mem_rdata = 0;
+            mem_cen = 0;
+            mem_wen = 0;
+            write_data = 0;
+            
+            case(opcode) 
+                7'b0010111: begin //auipc
+                    regwrite = 1;
+                    imm = inst[31:12];
+                    write_data = PC + {imm, 12'b0};
+                end
+                7'b1101111: begin //jal
+                    regwrite = 1;
+                    imm[20:0]  = {inst[31], inst[19:12], inst[20], inst[30:21], 1'b0};
+                    next_PC = $signed({1'b0, PC}) + $signed(imm[20:0]);
+                    write_data = PC + 4;
+                end
+                7'b1100111: begin //jalr
+                    regwrite = 1;
+                    imm[11:0] = inst[31:20];
+                    next_PC = $signed({1'b0, rs1_data}) + $signed(imm[11:0]);
+                    write_data = PC + 4;
+                end
+                7'b0110011: begin // add, sub, and, xor
+                    
+                    case({funct3, funct7})
+                        {ADD_FUNCT3, ADD_FUNCT7}: begin
                             regwrite = 1;
+                            write_data = rs1_data + rs2_data;
+                            // dealing with overflow
                         end
-                        else begin
-                            next_PC = PC;
+                        {SUB_FUNCT3, SUB_FUNCT7}: begin
+                            regwrite = 1;
+                            write_data = rs1_data - rs2_data;
+                        end
+                        {AND_FUNCT3, ADD_FUNCT7}: begin
+                            regwrite = 1;
+                            write_data = rs1_data & rs2_data;
+                        end
+                        {XOR_FUNCT3, XOR_FUNCT7}: begin
+                            regwrite = 1;
+                            write_data = rs1_data ^ rs2_data;
+                        end
+                        {MUL_FUNCT3, MUL_FUNCT7}: begin
                             regwrite = 0;
+                            mul_mode = 2;
+                            mul_valid = 1;
+                            
+                            if (mul_ready) begin
+                                next_PC = PC + 4;
+                                regwrite = 1;
+                            end
+                            else begin
+                                next_PC = PC;
+                                regwrite = 0;
+                            end
+                            write_data = mul_result[31:0];
                         end
-                        write_data = mul_result[31:0];
-                    end
-                endcase
-            end
-            7'b0010011: begin
-                case (funct3)
-                    ADDI_FUNCT3: begin //addi
-                        regwrite = 1;
-                        imm = inst[31:20];
-                        write_data = rs1_data + $signed(imm);
-                    end
-                    SLLI_FUNCT3: begin //slli
-                        regwrite = 1;
-                        imm = inst[31:20];
-                        write_data = rs1_data << $signed(imm);
-                    end
-                    SLTI_FUNCT3: begin //slti
-                        regwrite = 1;
-                        imm = inst[31:20];
-                        write_data = (rs1_data < $signed(imm))? 1 : 0;
-                    end
-                    SRAI_FUNCT3: begin //srai
-                        regwrite = 1;
-                        imm = inst[31:20];
-                        write_data = rs1_data >> $signed(imm);
-                    end
-                    default: begin
-                        next_PC = PC + 4;
-                        regwrite = 0;
-                        write_data = 0;
-                        imm = 0;
-                    end
-                endcase
-            end
-            7'b0000011: begin //lw
-                regwrite = 1;
-                imm = inst[31:20];
-                mem_addr = rs1_data + $signed(imm);
-                mem_wen = 0;
-                mem_cen = 1;
-                write_data = mem_rdata;
-            end
-            7'b0100011: begin //sw
-                regwrite = 0;
-                imm = {inst[31:25], inst[11:7]};
-                mem_addr = rs1_data + $signed(imm);
-                mem_rdata = rs2_data;
-                mem_cen = 1;
-                mem_wen = 1;
-            end
-            7'b1100011: begin //beq, bge, blt, bne
-                imm = {inst[31], inst[7], inst[30:25], inst[11:8], 1'b0};
-                case(funct3)
-                    BEQ_FUNCT3: begin //beq
-                        if(rs1_data == rs2_data) begin
-                            next_PC = PC + $signed(imm);
+                        default: begin
+                            next_PC = PC + 4;
+                            regwrite = 0;
+                            write_data = 0;
                         end
-                        else begin
+                    endcase
+                end
+                7'b0010011: begin
+                    case (funct3)
+                        ADDI_FUNCT3: begin //addi
+                            regwrite = 1;
+                            imm = inst[31:20];
+                            write_data = rs1_data + $signed(imm);
+                        end
+                        SLLI_FUNCT3: begin //slli
+                            regwrite = 1;
+                            imm = inst[31:20];
+                            write_data = rs1_data << $signed(imm);
+                        end
+                        SLTI_FUNCT3: begin //slti
+                            regwrite = 1;
+                            imm = inst[31:20];
+                            write_data = (rs1_data < $signed(imm))? 1 : 0;
+                        end
+                        SRAI_FUNCT3: begin //srai
+                            regwrite = 1;
+                            imm = inst[31:20];
+                            write_data = rs1_data >> $signed(imm);
+                        end
+                        default: begin
+                            next_PC = PC + 4;
+                            regwrite = 0;
+                            write_data = 0;
+                            imm = 0;
+                        end
+                    endcase
+                end
+                7'b0000011: begin //lw
+                    regwrite = 1;
+                    imm = inst[31:20];
+                    if(state == S_IDLE) begin
+                        mem_wen = 0;
+                        mem_cen = 0;
+                        write_data = i_DMEM_rdata;
+                    end
+                    else begin
+                        mem_addr = rs1_data + $signed(imm);
+                        mem_wen = 0;
+                        mem_cen = 1;
+                    end
+                end
+                7'b0100011: begin //sw
+                    regwrite = 0;
+                    imm = {inst[31:25], inst[11:7]};
+                    if(state == S_IDLE) begin
+                        mem_wen = 0;
+                        mem_cen = 0;
+                    end
+                    else begin
+                        mem_addr = rs1_data + $signed(imm);
+                        mem_wdata = rs2_data;
+                        mem_cen = 1;
+                        mem_wen = 1;
+                    end
+                    //wait for stall
+
+                end
+                7'b1100011: begin //beq, bge, blt, bne
+                    imm = {inst[31], inst[7], inst[30:25], inst[11:8], 1'b0};
+                    case(funct3)
+                        BEQ_FUNCT3: begin //beq
+                            if(rs1_data == rs2_data) begin
+                                next_PC = PC + $signed(imm);
+                            end
+                            else begin
+                                next_PC = PC + 4;
+                            end
+                        end
+                        BGE_FUNCT3: begin //bge
+                            if(rs1_data >= rs2_data) begin
+                                next_PC = PC + $signed(imm);
+                            end
+                            else begin
+                                next_PC = PC + 4;
+                            end
+                        end
+                        BLT_FUNCT3: begin //blt
+                            if(rs1_data < rs2_data) begin
+                                next_PC = PC + $signed(imm);
+                            end
+                            else begin
+                                next_PC = PC + 4;
+                            end
+                        end
+                        BNE_FUNCT3: begin //bne
+                            if(rs1_data != rs2_data) begin
+                                next_PC = PC + $signed(imm);
+                            end
+                            else begin
+                                next_PC = PC + 4;
+                            end
+                        end
+                        default: begin
                             next_PC = PC + 4;
                         end
-                    end
-                    BGE_FUNCT3: begin //bge
-                        if(rs1_data >= rs2_data) begin
-                            next_PC = PC + $signed(imm);
-                        end
-                        else begin
-                            next_PC = PC + 4;
-                        end
-                    end
-                    BLT_FUNCT3: begin //blt
-                        if(rs1_data < rs2_data) begin
-                            next_PC = PC + $signed(imm);
-                        end
-                        else begin
-                            next_PC = PC + 4;
-                        end
-                    end
-                    BNE_FUNCT3: begin //bne
-                        if(rs1_data != rs2_data) begin
-                            next_PC = PC + $signed(imm);
-                        end
-                        else begin
-                            next_PC = PC + 4;
-                        end
-                    end
-                    default: begin
-                        next_PC = PC + 4;
-                    end
-                endcase
-            end
-            7'b1110011: begin //ecall
-                regwrite = 0;
-                finish = 1;
-            end
-            default: begin
-                next_PC = PC + 4;
-                regwrite = 0;
-                write_data = 0;
-                imm = 0;
-                finish = 0;
-                mem_addr = 0;
-                mem_wdata = 0;
-                mem_rdata = 0;
-                mem_cen = 0;
-                mem_wen = 0;
-            end
-        endcase
+                    endcase
+                end
+                7'b1110011: begin //ecall
+                    regwrite = 0;
+                    finish = 1;
+                end
+                default: begin
+                    next_PC = PC + 4;
+                    regwrite = 0;
+                    write_data = 0;
+                    imm = 0;
+                    finish = 0;
+                    mem_addr = 0;
+                    mem_wdata = 0;
+                    mem_rdata = 0;
+                    mem_cen = 0;
+                    mem_wen = 0;
+                end
+            endcase
+        end
     end
 
 endmodule
@@ -455,6 +483,7 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
     reg [4:0] counter, counter_nxt;
     reg rdy, rdy_nxt;
     reg [1:0]mode_now, mode_nxt;
+    reg [63: 0] temp;
     assign ready = rdy;
     assign out = alu_out;
 
@@ -533,31 +562,32 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
     end
 
     always @(*) begin
-        case(mode_now)
-            2'b00: begin
-                alu_out = operand_a << operand_b;
-            end
-            2'b01: begin
-                alu_out = operand_a >> operand_b;
-            end
-            2'b10: begin
-                    if(operand_b[counter]) begin
-                        alu_out = alu_out + (operand_a << counter);
-                    end
-                    else begin
-                        alu_out = alu_out;
-                    end
-                    if(counter == 31) begin //output the lower 32 bits
-                        alu_out = alu_out[31:0];
-                    end
-                    else begin
-                        alu_out = alu_out;
-                    end
-            end
-            default: begin
-                alu_out = 0;
-            end
-        endcase
+        if(rst_n) begin
+            case(mode_now)
+                2'b00: begin
+                    temp = operand_a << operand_b;
+                end
+                2'b01: begin
+                    temp = operand_a >> operand_b;
+                end
+                2'b10: begin
+                        if(operand_b[counter]) begin
+                            temp = (operand_a <<< counter);
+                            temp = temp + alu_out;
+                        end
+                        else begin
+                            temp = alu_out;
+                        end
+                end
+                default: begin
+                    temp = 64'h0000_0000_0000_0000;  
+                end
+            endcase
+        end
+        else begin
+            temp = 64'h0000_0000_0000_0000;
+        end
+        alu_out <= temp;
     end
 
     always @(posedge clk or negedge rst_n) begin
@@ -567,7 +597,6 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
             operand_b <= 0;
             result <= 0;
             done <= 0;
-            alu_out <= 0;
             counter <= 0;
             rdy <= 0;
             mode_now <= 3;
@@ -576,7 +605,6 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
             state <= state_nxt;
             operand_a <= operand_a_nxt;
             operand_b <= operand_b_nxt;
-            alu_out <= alu_out;
             counter <= counter_nxt;
             rdy <= rdy_nxt;
             mode_now <= mode_nxt;
