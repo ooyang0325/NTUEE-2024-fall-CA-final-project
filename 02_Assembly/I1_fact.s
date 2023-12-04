@@ -11,7 +11,7 @@ fact:
     beq x5, x0, L1
     addi x10, x0, 1
     addi sp, sp, 8
-    
+
     jalr x0, 0(x1)
 L1:
     addi x10, x10, -1

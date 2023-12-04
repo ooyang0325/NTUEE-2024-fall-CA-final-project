@@ -91,7 +91,7 @@ module CHIP #(                                                                  
     
     // TODO: any declaration
         reg [BIT_W-1:0] PC, next_PC;
-        reg mem_cen, mem_wen, imem_cen;
+        reg mem_cen, mem_wen, imem_cen, mem_cen_nxt, mem_wen_nxt;
         reg [BIT_W-1:0] mem_addr, mem_wdata, mem_rdata;
         wire mem_stall;
 
@@ -114,6 +114,7 @@ module CHIP #(                                                                  
         parameter S_IDLE = 0, S_MULTI_CYCLE_EXEC = 1, S_ONE_CYCLE_EXEC = 2;
         reg finish;
         reg [31:0] temp;
+        reg [3:0] stall_counter;
         
 
 
@@ -168,7 +169,12 @@ module CHIP #(                                                                  
     always @(*) begin
         case(state)
             S_IDLE: begin
-                state_nxt = ({opcode, funct3, funct7} == {MUL, MUL_FUNCT3, MUL_FUNCT7})? S_MULTI_CYCLE_EXEC : S_ONE_CYCLE_EXEC;
+                if(mem_stall || stall_counter > 1) begin
+                    state_nxt = S_IDLE;
+                end
+                else begin
+                    state_nxt = ({opcode, funct3, funct7} == {MUL, MUL_FUNCT3, MUL_FUNCT7})? S_MULTI_CYCLE_EXEC : S_ONE_CYCLE_EXEC;
+                end
             end
             S_MULTI_CYCLE_EXEC: begin
                 if (mul_ready == 0) begin
@@ -195,26 +201,65 @@ module CHIP #(                                                                  
 
     always @(posedge i_clk or negedge i_rst_n) begin
         if (!i_rst_n) begin
-            PC <= 32'h00010000; // Do not modify this value!!!
-            state <= S_IDLE;
+            PC = 32'h00010000; // Do not modify this value!!!
+            state = S_IDLE;
+            mem_cen = 0;
+            mem_wen = 0;
         end
         else begin
-            state <= state_nxt;
-            PC <= next_PC;
+            state = state_nxt;
+            PC = next_PC;
+            mem_cen = mem_cen_nxt;
+            mem_wen = mem_wen_nxt;
+        end
+    end
+
+    always @(posedge i_clk) begin
+        if ( mem_stall || opcode == LW && stall_counter < 11 || opcode == SW && stall_counter < 7 ) begin
+            stall_counter = stall_counter + 1;
+        end
+        else begin
+            stall_counter = 4'b0000;
         end
     end
 
     always @(*) begin
         imem_cen = 1;
         inst = i_IMEM_data;
-        if(i_DMEM_stall) begin
+        if(mem_stall) begin
             next_PC = PC;
             finish = 0;
             regwrite = 0;
-            //mem_cen = 0;
-            //mem_wen = 0;
+            mem_cen_nxt = 0;
+            mem_wen_nxt = 0;
+            opcode = inst[6:0];
+            funct3 = inst[14:12];
+            funct7 = inst[31:25];
+            rs1 = inst[19:15];
+            rs2 = inst[24:20];
+            rd = inst[11:7];
+            regwrite = 0;
+            mul_valid = 0;
+            mul_mode = 3;
+            mul_in_a = 0;
+            mul_in_b = 0;
+            regwrite = 0;
+            mem_wdata = rs2_data;
+            if(opcode == LW) begin
+                imm = inst[31:20];
+                mem_addr = rs1_data + $signed(imm);
+            end
+            else if(opcode == SW) begin
+                imm = {inst[31:25], inst[11:7]};
+                mem_addr = rs1_data + $signed(imm);
+            end
+            else begin
+                mem_addr = 0;
+            end
+            write_data = 0;
+            imm = 0;
         end
-        else begin
+        else if(i_rst_n)begin
             next_PC = PC + 4;
             finish = 0;
             opcode = inst[6:0];
@@ -228,30 +273,28 @@ module CHIP #(                                                                  
             mul_mode = 3;
             mul_in_a = 0;
             mul_in_b = 0;
-            regwrite = 0;
             mem_addr = 0;
             mem_wdata = 0;
             mem_rdata = 0;
-            mem_cen = 0;
-            mem_wen = 0;
+            mem_cen_nxt = 0;
+            mem_wen_nxt = 0;
             write_data = 0;
-            
+            imm = 0;
             case(opcode) 
                 7'b0010111: begin //auipc
                     regwrite = 1;
-                    imm = inst[31:12];
-                    write_data = PC + {imm, 12'b0};
+                    imm[19:0] = inst[31:12];
+                    write_data = PC + {imm[31:12], 12'b0};
                 end
                 7'b1101111: begin //jal
                     regwrite = 1;
-                    imm[20:0]  = {inst[31], inst[19:12], inst[20], inst[30:21], 1'b0};
-                    next_PC = $signed({1'b0, PC}) + $signed(imm[20:0]);
+                    next_PC = $signed(PC) + $signed({inst[31], inst[19:12], inst[20], inst[30:21], 1'b0});
                     write_data = PC + 4;
                 end
                 7'b1100111: begin //jalr
                     regwrite = 1;
                     imm[11:0] = inst[31:20];
-                    next_PC = $signed({1'b0, rs1_data}) + $signed(imm[11:0]);
+                    next_PC = $signed(rs1_data) + $signed(imm[11:0]);
                     write_data = PC + 4;
                 end
                 7'b0110011: begin // add, sub, and, xor
@@ -259,12 +302,12 @@ module CHIP #(                                                                  
                     case({funct3, funct7})
                         {ADD_FUNCT3, ADD_FUNCT7}: begin
                             regwrite = 1;
-                            write_data = rs1_data + rs2_data;
+                            write_data = $signed(rs1_data) + $signed(rs2_data);
                             // dealing with overflow
                         end
                         {SUB_FUNCT3, SUB_FUNCT7}: begin
                             regwrite = 1;
-                            write_data = rs1_data - rs2_data;
+                            write_data = $signed(rs1_data) - $signed(rs2_data);
                         end
                         {AND_FUNCT3, ADD_FUNCT7}: begin
                             regwrite = 1;
@@ -278,10 +321,14 @@ module CHIP #(                                                                  
                             regwrite = 0;
                             mul_mode = 2;
                             mul_valid = 1;
-                            
+                            mul_in_a <= rs1_data;
+                            mul_in_b <= rs2_data;
+                            //$display("mul_valid = %d", mul_valid);
                             if (mul_ready) begin
                                 next_PC = PC + 4;
                                 regwrite = 1;
+                                mul_mode = 3;
+                                mul_valid = 1;
                             end
                             else begin
                                 next_PC = PC;
@@ -300,23 +347,19 @@ module CHIP #(                                                                  
                     case (funct3)
                         ADDI_FUNCT3: begin //addi
                             regwrite = 1;
-                            imm = inst[31:20];
-                            write_data = rs1_data + $signed(imm);
+                            write_data = $signed(rs1_data) + $signed(inst[31:20]);
                         end
                         SLLI_FUNCT3: begin //slli
                             regwrite = 1;
-                            imm = inst[31:20];
-                            write_data = rs1_data << $signed(imm);
+                            write_data = $signed(rs1_data) << inst[31:20];
                         end
                         SLTI_FUNCT3: begin //slti
                             regwrite = 1;
-                            imm = inst[31:20];
-                            write_data = (rs1_data < $signed(imm))? 1 : 0;
+                            write_data = ($signed(rs1_data) < $signed(inst[31:20]))? 1 : 0;
                         end
                         SRAI_FUNCT3: begin //srai
                             regwrite = 1;
-                            imm = inst[31:20];
-                            write_data = rs1_data >> $signed(imm);
+                            write_data = $signed(rs1_data) >> inst[31:20];
                         end
                         default: begin
                             next_PC = PC + 4;
@@ -327,34 +370,47 @@ module CHIP #(                                                                  
                     endcase
                 end
                 7'b0000011: begin //lw
-                    regwrite = 1;
                     imm = inst[31:20];
-                    if(state == S_IDLE) begin
-                        mem_wen = 0;
-                        mem_cen = 0;
+                    if(stall_counter == 11) begin
+                        if(!i_clk) begin
+                            regwrite = 1;
+                        end
+                        else begin
+                            regwrite = 0;
+                        end
+                        mem_wen_nxt = 0;
+                        mem_cen_nxt = 0;
                         write_data = i_DMEM_rdata;
+                    end
+                    else if(stall_counter > 11) begin
+                        regwrite = 0;
+                        mem_wen_nxt = 0;
+                        mem_cen_nxt = 0;
+                        write_data = mem_rdata;
                     end
                     else begin
                         mem_addr = rs1_data + $signed(imm);
-                        mem_wen = 0;
-                        mem_cen = 1;
+                        mem_wen_nxt = 0;
+                        mem_cen_nxt = 1;
+                        next_PC = PC;
                     end
                 end
                 7'b0100011: begin //sw
                     regwrite = 0;
                     imm = {inst[31:25], inst[11:7]};
-                    if(state == S_IDLE) begin
-                        mem_wen = 0;
-                        mem_cen = 0;
+                    if(stall_counter == 7) begin
+                        mem_addr = rs1_data + $signed(imm);
+                        mem_wdata = rs2_data;
+                        mem_wen_nxt = 0;
+                        mem_cen_nxt = 0;
                     end
                     else begin
                         mem_addr = rs1_data + $signed(imm);
                         mem_wdata = rs2_data;
-                        mem_cen = 1;
-                        mem_wen = 1;
+                        mem_cen_nxt = 1;
+                        mem_wen_nxt = 1;
+                        next_PC = PC;
                     end
-                    //wait for stall
-
                 end
                 7'b1100011: begin //beq, bge, blt, bne
                     imm = {inst[31], inst[7], inst[30:25], inst[11:8], 1'b0};
@@ -368,7 +424,7 @@ module CHIP #(                                                                  
                             end
                         end
                         BGE_FUNCT3: begin //bge
-                            if(rs1_data >= rs2_data) begin
+                            if($signed(rs1_data) >= $signed(rs2_data)) begin
                                 next_PC = PC + $signed(imm);
                             end
                             else begin
@@ -376,7 +432,7 @@ module CHIP #(                                                                  
                             end
                         end
                         BLT_FUNCT3: begin //blt
-                            if(rs1_data < rs2_data) begin
+                            if($signed(rs1_data) < $signed(rs2_data)) begin
                                 next_PC = PC + $signed(imm);
                             end
                             else begin
@@ -409,10 +465,32 @@ module CHIP #(                                                                  
                     mem_addr = 0;
                     mem_wdata = 0;
                     mem_rdata = 0;
-                    mem_cen = 0;
-                    mem_wen = 0;
+                    mem_cen_nxt = 0;
+                    mem_wen_nxt = 0;
                 end
             endcase
+        end
+        else begin
+            next_PC = 0;
+            finish = 0;
+            opcode = 0;
+            funct3 = 0;
+            funct7 = 0;
+            rs1 = 0;
+            rs2 = 0;
+            rd = 0;
+            regwrite = 0;
+            mul_valid = 0;
+            mul_mode = 3;
+            mul_in_a = 0;
+            mul_in_b = 0;
+            mem_addr = 0;
+            mem_wdata = 0;
+            mem_rdata = 0;
+            mem_cen_nxt = 0;
+            mem_wen_nxt = 0;
+            write_data = 0;
+            imm = 0;
         end
     end
 
@@ -476,9 +554,8 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
     parameter S_IDLE = 2'b00, S_ONE_CYCLE_OP = 2'b01, S_MULTI_CYCLE_OP = 2'b10;
 
     // definition of internal signals
-    reg [31:0] operand_a, operand_b, operand_a_nxt, operand_b_nxt;
+    reg [31:0] operand_a, operand_b;
     reg [31:0] result;
-    reg done;
     reg [63:0] alu_out;
     reg [4:0] counter, counter_nxt;
     reg rdy, rdy_nxt;
@@ -487,16 +564,33 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
     assign ready = rdy;
     assign out = alu_out;
 
-    always @(*) begin
-        if (valid && counter == 0) begin
-            operand_a_nxt = in_A;
-            operand_b_nxt = in_B;
+    always @(negedge clk) begin
+        if (valid && counter == 0 && rst_n && rdy == 0) begin
+            operand_a = in_A;
+            operand_b = in_B;
+            mode_now = mode;
             mode_nxt = mode;
+            counter <= 1;
+            state <= state_nxt;
+            rdy <= 0;
+        end
+        else if(rst_n)begin
+            operand_a = operand_a;
+            operand_b = operand_b;
+            mode_now = mode_nxt;
+            mode_nxt = mode;
+            counter <= counter_nxt;
+            state <= state_nxt;
+            rdy <= rdy_nxt;
         end
         else begin
-            operand_a_nxt = operand_a;
-            operand_b_nxt = operand_b;
-            mode_nxt = mode_now;
+            operand_a = 0;
+            operand_b = 0;
+            mode_now = 3;
+            mode_nxt = 3;
+            counter <= 0;
+            state <= S_IDLE;
+            rdy <= 0;
         end
     end
 
@@ -507,7 +601,7 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
                     state_nxt = S_IDLE;
                 end
                 else begin
-                    case(mode_now)
+                    case(mode)
                         2'b00: begin
                             state_nxt = S_ONE_CYCLE_OP;
                         end
@@ -586,30 +680,11 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
         end
         else begin
             temp = 64'h0000_0000_0000_0000;
+            result <= 0;
         end
         alu_out <= temp;
     end
 
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            state <= S_IDLE;
-            operand_a <= 0;
-            operand_b <= 0;
-            result <= 0;
-            done <= 0;
-            counter <= 0;
-            rdy <= 0;
-            mode_now <= 3;
-        end
-        else begin
-            state <= state_nxt;
-            operand_a <= operand_a_nxt;
-            operand_b <= operand_b_nxt;
-            counter <= counter_nxt;
-            rdy <= rdy_nxt;
-            mode_now <= mode_nxt;
-        end
-    end
 endmodule
 
 module Cache#(
