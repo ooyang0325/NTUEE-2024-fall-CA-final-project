@@ -224,6 +224,8 @@ module CHIP #(                                                                  
     end
 
     always @(*) begin
+        //$display("PC = %d", PC);
+        //$display("next_PC = %d", next_PC);
         imem_cen = 1;
         inst = i_IMEM_data;
         if(mem_stall) begin
@@ -319,19 +321,19 @@ module CHIP #(                                                                  
                         end
                         {MUL_FUNCT3, MUL_FUNCT7}: begin
                             regwrite = 0;
-                            mul_mode = 2;
-                            mul_valid = 1;
-                            mul_in_a <= rs1_data;
-                            mul_in_b <= rs2_data;
+                            mul_in_a = rs1_data;
+                            mul_in_b = rs2_data;
                             //$display("mul_valid = %d", mul_valid);
                             if (mul_ready) begin
                                 next_PC = PC + 4;
                                 regwrite = 1;
                                 mul_mode = 3;
-                                mul_valid = 1;
+                                mul_valid = 0;
                             end
                             else begin
                                 next_PC = PC;
+                                mul_mode = 2;
+                                mul_valid = 1;
                                 regwrite = 0;
                             end
                             write_data = mul_result[31:0];
@@ -554,43 +556,45 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
     parameter S_IDLE = 2'b00, S_ONE_CYCLE_OP = 2'b01, S_MULTI_CYCLE_OP = 2'b10;
 
     // definition of internal signals
-    reg [31:0] operand_a, operand_b;
-    reg [31:0] result;
-    reg [63:0] alu_out;
-    reg [4:0] counter, counter_nxt;
+    reg [63:0] alu_out, operand_a, operand_b;
+    reg [5:0] counter, counter_nxt;
     reg rdy, rdy_nxt;
     reg [1:0]mode_now, mode_nxt;
-    reg [63: 0] temp;
+    reg [63: 0] temp, temp_nxt;
     assign ready = rdy;
     assign out = alu_out;
 
     always @(negedge clk) begin
         if (valid && counter == 0 && rst_n && rdy == 0) begin
-            operand_a = in_A;
-            operand_b = in_B;
-            mode_now = mode;
-            mode_nxt = mode;
+            mode_now <= mode;
+            mode_nxt <= mode;
             counter <= 1;
             state <= state_nxt;
             rdy <= 0;
+            temp <= temp_nxt;
         end
         else if(rst_n)begin
-            operand_a = operand_a;
-            operand_b = operand_b;
-            mode_now = mode_nxt;
-            mode_nxt = mode;
+            if (counter == 33) begin
+                mode_now <= 3;
+                mode_nxt <= 3;
+                temp <= temp_nxt;
+            end
+            else begin
+                mode_now <= mode_nxt;
+                mode_nxt <= mode;
+                temp <= temp_nxt;
+            end
             counter <= counter_nxt;
             state <= state_nxt;
             rdy <= rdy_nxt;
         end
         else begin
-            operand_a = 0;
-            operand_b = 0;
-            mode_now = 3;
-            mode_nxt = 3;
+            mode_now <= 3;
+            mode_nxt <= 3;
             counter <= 0;
             state <= S_IDLE;
             rdy <= 0;
+            temp <= 0;
         end
     end
 
@@ -621,7 +625,7 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
                 state_nxt = S_IDLE;
             end
             S_MULTI_CYCLE_OP: begin
-                if(counter == 31) begin
+                if(counter == 33) begin
                     state_nxt = S_IDLE;
                 end
                 else begin
@@ -636,8 +640,12 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
 
     always @(*) begin
         if (state == S_MULTI_CYCLE_OP) begin
-            if(counter == 31) begin
+            if(counter == 32) begin
                 rdy_nxt = 1;
+                counter_nxt = 33;
+            end
+            else if(counter > 32) begin
+                rdy_nxt = 0;
                 counter_nxt = 0;
             end
             else begin
@@ -656,33 +664,36 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
     end
 
     always @(*) begin
-        if(rst_n) begin
+        if(rst_n && valid && counter > 0) begin
+            operand_a = in_A;
+            operand_b = in_B;
             case(mode_now)
                 2'b00: begin
-                    temp = operand_a << operand_b;
+                    temp_nxt = operand_a << operand_b;
                 end
                 2'b01: begin
-                    temp = operand_a >> operand_b;
+                    temp_nxt = operand_a >> operand_b;
                 end
                 2'b10: begin
-                        if(operand_b[counter]) begin
-                            temp = (operand_a <<< counter);
-                            temp = temp + alu_out;
-                        end
-                        else begin
-                            temp = alu_out;
-                        end
+                    //$display("counter = %d", (counter-1));
+                    //$display("operand_b[counter] = %d", operand_b[(counter-1)]);
+                    //$display("operand_a = %d", operand_a);
+                    if(operand_b[(counter-1)]) begin
+                        temp_nxt = temp + (operand_a <<< (counter-1));
+                    end
+                    else begin
+                        temp_nxt = alu_out;
+                    end
                 end
                 default: begin
-                    temp = 64'h0000_0000_0000_0000;  
+                    temp_nxt = 64'h0000_0000_0000_0000;  
                 end
             endcase
         end
         else begin
-            temp = 64'h0000_0000_0000_0000;
-            result <= 0;
+            temp_nxt = 64'h0000_0000_0000_0000;
         end
-        alu_out <= temp;
+        alu_out = temp;
     end
 
 endmodule

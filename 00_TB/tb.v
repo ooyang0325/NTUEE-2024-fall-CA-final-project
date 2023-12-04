@@ -2,7 +2,7 @@
 `timescale 1 ns/10 ps
 
 `define CYCLE 10          // Do not change this value!!!
-`define END_CYCLE 1000000000 // You can modify your maximum cycles
+`define END_CYCLE 10000 // You can modify your maximum cycles
 
 `include "../00_TB/memory.v"
 `define SIZE_DATA 1024  // You can change the size
