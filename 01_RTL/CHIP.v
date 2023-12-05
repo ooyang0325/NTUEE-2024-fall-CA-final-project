@@ -217,7 +217,7 @@ module CHIP #(                                                                  
     end
 
     always @(posedge i_clk) begin
-        if ( mem_stall || opcode == LW && stall_counter < 11 || opcode == SW && stall_counter < 7 ) begin
+        if ((opcode == LW && funct3 == LW_FUNCT3 || opcode == SW && funct3 == SW_FUNCT3) && mem_stall == 1) begin
             stall_counter = stall_counter + 1;
         end
         else begin
@@ -321,6 +321,7 @@ module CHIP #(                                                                  
                             regwrite = 1;
                             write_data = rs1_data ^ rs2_data;
                         end
+                        /*
                         {DIV_FUNCT3, DIV_FUNCT7}: begin
                             regwrite = 0;
                             mul_in_a = rs1_data;
@@ -340,6 +341,7 @@ module CHIP #(                                                                  
                             end
                             write_data = mul_result[31:0];
                         end
+                        */
                         {MUL_FUNCT3, MUL_FUNCT7}: begin
                             regwrite = 0;
                             mul_in_a = rs1_data;
@@ -396,22 +398,11 @@ module CHIP #(                                                                  
                 end
                 7'b0000011: begin //lw
                     imm = inst[31:20];
-                    if(stall_counter == 11) begin
-                        if(!i_clk) begin
-                            regwrite = 1;
-                        end
-                        else begin
-                            regwrite = 0;
-                        end
+                    if(!mem_stall && stall_counter > 0) begin
+                        regwrite = 1;
                         mem_wen_nxt = 0;
                         mem_cen_nxt = 0;
                         write_data = i_DMEM_rdata;
-                    end
-                    else if(stall_counter > 11) begin
-                        regwrite = 0;
-                        mem_wen_nxt = 0;
-                        mem_cen_nxt = 0;
-                        write_data = mem_rdata;
                     end
                     else begin
                         mem_addr = rs1_data + $signed(imm);
@@ -423,7 +414,7 @@ module CHIP #(                                                                  
                 7'b0100011: begin //sw
                     regwrite = 0;
                     imm = {inst[31:25], inst[11:7]};
-                    if(stall_counter == 7) begin
+                    if(!mem_stall && stall_counter > 0) begin
                         mem_addr = rs1_data + $signed(imm);
                         mem_wdata = rs2_data;
                         mem_wen_nxt = 0;
@@ -695,6 +686,7 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
                     temp_nxt = operand_a << operand_b;
                     temp_1 = 64'h0000_0000_0000_0000;
                 end
+                /*
                 2'b01: begin//div
                     if(counter == 1) begin
                         temp = {32'h0000_0000, operand_a[31:0]};
@@ -719,6 +711,7 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
                         end
                     end
                 end
+                */
                 2'b10: begin
                     //$display("counter = %d", (counter-1));
                     //$display("operand_b[counter] = %d", operand_b[(counter-1)]);
