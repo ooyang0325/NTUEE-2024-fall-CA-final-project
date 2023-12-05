@@ -51,6 +51,7 @@ module CHIP #(                                                                  
     parameter LW = 7'b0000011;
     parameter SW = 7'b0100011;
     parameter MUL = 7'b0110011;
+    parameter DIV = 7'b0110011;
     parameter BEQ = 7'b1100011;
     parameter BGE = 7'b1100011;
     parameter BLT = 7'b1100011;
@@ -70,6 +71,7 @@ module CHIP #(                                                                  
     parameter LW_FUNCT3 = 3'b010;
     parameter SW_FUNCT3 = 3'b010;
     parameter MUL_FUNCT3 = 3'b000;
+    parameter DIV_FUNCT3 = 3'b100;
     parameter BEQ_FUNCT3 = 3'b000;
     parameter BGE_FUNCT3 = 3'b101;
     parameter BLT_FUNCT3 = 3'b100;
@@ -83,7 +85,7 @@ module CHIP #(                                                                  
     parameter SLLI_FUNCT7 = 7'b0000000;
     parameter SRAI_FUNCT7 = 7'b0100000;
     parameter MUL_FUNCT7 = 7'b0000001;
-
+    parameter DIV_FUNCT7 = 7'b0000001;
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------
 // Wires and Registers
@@ -319,6 +321,25 @@ module CHIP #(                                                                  
                             regwrite = 1;
                             write_data = rs1_data ^ rs2_data;
                         end
+                        {DIV_FUNCT3, DIV_FUNCT7}: begin
+                            regwrite = 0;
+                            mul_in_a = rs1_data;
+                            mul_in_b = rs2_data;
+                            //$display("mul_valid = %d", mul_valid);
+                            if (mul_ready) begin
+                                next_PC = PC + 4;
+                                regwrite = 1;
+                                mul_mode = 3;
+                                mul_valid = 0;
+                            end
+                            else begin
+                                next_PC = PC;
+                                mul_mode = 1;
+                                mul_valid = 1;
+                                regwrite = 0;
+                            end
+                            write_data = mul_result[31:0];
+                        end
                         {MUL_FUNCT3, MUL_FUNCT7}: begin
                             regwrite = 0;
                             mul_in_a = rs1_data;
@@ -353,7 +374,7 @@ module CHIP #(                                                                  
                         end
                         SLLI_FUNCT3: begin //slli
                             regwrite = 1;
-                            write_data = $signed(rs1_data) << inst[31:20];
+                            write_data = rs1_data << $unsigned(inst[24:20]);
                         end
                         SLTI_FUNCT3: begin //slti
                             regwrite = 1;
@@ -361,7 +382,9 @@ module CHIP #(                                                                  
                         end
                         SRAI_FUNCT3: begin //srai
                             regwrite = 1;
-                            write_data = $signed(rs1_data) >> inst[31:20];
+                            $display("rs1_data = %d", rs1_data);
+                            $display("imm = %d", inst[24:20]);
+                            write_data = rs1_data >> $unsigned(inst[24:20]);
                         end
                         default: begin
                             next_PC = PC + 4;
@@ -546,7 +569,7 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
     // Todo: your HW2
     // Definition of ports
     input clk, rst_n, valid;
-    input [1:0] mode; // 0: shift left, 1: shift right, 2: mul, 3:IDLE
+    input [1:0] mode; // 0: shift left, 1: div, 2: mul, 3:IDLE
     output ready;
     input [31:0] in_A, in_B;
     output [63:0] out;
@@ -559,8 +582,8 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
     reg [63:0] alu_out, operand_a, operand_b;
     reg [5:0] counter, counter_nxt;
     reg rdy, rdy_nxt;
-    reg [1:0]mode_now, mode_nxt;
-    reg [63: 0] temp, temp_nxt;
+    reg [1:0] mode_now, mode_nxt;
+    reg [63: 0] temp, temp_nxt, temp_1;
     assign ready = rdy;
     assign out = alu_out;
 
@@ -610,7 +633,7 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
                             state_nxt = S_ONE_CYCLE_OP;
                         end
                         2'b01: begin
-                            state_nxt = S_ONE_CYCLE_OP;
+                            state_nxt = S_MULTI_CYCLE_OP;
                         end
                         2'b10: begin
                             state_nxt = S_MULTI_CYCLE_OP;
@@ -670,9 +693,31 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
             case(mode_now)
                 2'b00: begin
                     temp_nxt = operand_a << operand_b;
+                    temp_1 = 64'h0000_0000_0000_0000;
                 end
-                2'b01: begin
-                    temp_nxt = operand_a >> operand_b;
+                2'b01: begin//div
+                    if(counter == 1) begin
+                        temp = {32'h0000_0000, operand_a[31:0]};
+                        temp_1 = {operand_b[31:0], 32'h0000_0000};
+                        if({32'h0000_0000, operand_a[30:0], 1'b0} >= {operand_b[31:0], 32'h0000_0000}) begin
+                            temp_nxt = temp - temp_1 + 1'b1;
+                        end
+                        else begin
+                            temp_nxt = temp;
+                        end
+                    end
+                    else begin
+                        temp_1 = temp_1;
+                        temp = {temp[62:0], 1'b0};
+                        if(temp >= temp_1) begin
+                            $display ("temp = %d", temp);
+                            $display ("temp_1 = %d", temp_1);
+                            temp_nxt = temp - temp_1 + 1'b1;
+                        end
+                        else begin
+                            temp_nxt = temp;
+                        end
+                    end
                 end
                 2'b10: begin
                     //$display("counter = %d", (counter-1));
@@ -684,14 +729,17 @@ module MULDIV_unit(clk, rst_n, valid, ready, mode, in_A, in_B, out);
                     else begin
                         temp_nxt = alu_out;
                     end
+                    temp_1 = temp_1;
                 end
                 default: begin
                     temp_nxt = 64'h0000_0000_0000_0000;  
+                    temp_1 = 64'h0000_0000_0000_0000;
                 end
             endcase
         end
         else begin
             temp_nxt = 64'h0000_0000_0000_0000;
+            temp_1 = 64'h0000_0000_0000_0000;
         end
         alu_out = temp;
     end
