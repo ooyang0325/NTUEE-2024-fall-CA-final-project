@@ -384,8 +384,8 @@ module CHIP #(                                                                  
                         end
                         SRAI_FUNCT3: begin //srai
                             regwrite = 1;
-                            $display("rs1_data = %d", rs1_data);
-                            $display("imm = %d", inst[24:20]);
+                            //$display("rs1_data = %d", rs1_data);
+                            //$display("imm = %d", inst[24:20]);
                             write_data = rs1_data >> $unsigned(inst[24:20]);
                         end
                         default: begin
